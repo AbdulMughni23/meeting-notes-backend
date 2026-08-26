@@ -131,3 +131,24 @@ def process_meeting(data: MeetingInput):
         "roles": data.roles
     })
     return {"notes": result["formatted_notes"]}
+
+# It reuses the transcribe_audio() helper you already have -
+# no LLM/LangGraph call here, just Whisper. Formatting still
+# only happens once, at the end, via /process-meeting.
+ 
+@app.post("/transcribe-chunk")
+async def transcribe_chunk(
+    audio: UploadFile = File(...),
+    chunk_index: int = Form(...),
+):
+    with tempfile.NamedTemporaryFile(
+        delete=False, suffix=f".{audio.filename.split('.')[-1]}"
+    ) as temp_file:
+        temp_file.write(await audio.read())
+        temp_file_path = temp_file.name
+ 
+    try:
+        text = transcribe_audio(temp_file_path)
+        return {"chunk_index": chunk_index, "transcript": text}
+    finally:
+        os.unlink(temp_file_path)
