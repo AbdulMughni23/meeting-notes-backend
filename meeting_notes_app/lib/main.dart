@@ -33,7 +33,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _hasMeeting = false;
 
   // ⚠️ IMPORTANT: Replace with your computer's actual IPv4 Address!
-  final String baseUrl = 'http://192.168.1.XXX:8000';
+  final String baseUrl = 'https://meeting-notes-backend-60qx.onrender.com';
 
   // For now, we simulate receiving data from the watch
   // In the real app, this will be triggered by Bluetooth/Wi-Fi transfer
