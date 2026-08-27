@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:nearby_connections/nearby_connections.dart';
@@ -43,8 +42,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   final List<String> _log = [];
 
-  // FILE payload id -> path, until transfer SUCCESS confirms it's whole.
-  final Map<int, String> _pendingFilePaths = {};
   // Endpoint -> the session_start / chunk metadata expected next.
   final Map<String, Map<String, dynamic>> _pendingChunkMetaByEndpoint = {};
   // Endpoint -> accumulated meeting state.
@@ -93,23 +90,16 @@ class _HomeScreenState extends State<HomeScreen> {
             endpointId,
             onPayLoadRecieved: (String epId, Payload payload) {
               if (payload.type == PayloadType.BYTES && payload.bytes != null) {
-                _handleMetadata(epId, payload.bytes!);
-              } else if (payload.type == PayloadType.FILE &&
-                  payload.filePath != null) {
-                _pendingFilePaths[payload.id] = payload.filePath!;
+                _handleBytesPayload(epId, payload.bytes!);
               }
             },
             onPayloadTransferUpdate:
-                (String epId, PayloadTransferUpdate update) async {
-                  if (update.status == PayloadStatus.SUCCESS) {
-                    final filePath = _pendingFilePaths.remove(update.id);
-                    if (filePath != null) {
-                      await _handleChunkFile(epId, filePath);
-                    }
-                  } else if (update.status == PayloadStatus.FAILURE) {
-                    _pendingFilePaths.remove(update.id);
-                    _addLog('A chunk transfer failed - continuing.');
+                (String epId, PayloadTransferUpdate update) {
+                  if (update.status == PayloadStatus.FAILURE) {
+                    _addLog('A payload transfer failed - continuing.');
                   }
+                  // BYTES payloads arrive whole in onPayLoadRecieved above,
+                  // so there's nothing to do here on SUCCESS.
                 },
           );
         },
@@ -133,34 +123,44 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _handleMetadata(String epId, List<int> bytes) {
+  // A BYTES payload is either the small JSON metadata message, or the
+  // raw audio chunk itself. JSON.decode on real audio bytes throws
+  // (they're not valid UTF-8/JSON), so that failure is exactly the
+  // signal that this payload is audio, not metadata.
+  void _handleBytesPayload(String epId, List<int> bytes) {
     try {
       final decoded = jsonDecode(utf8.decode(bytes));
       if (decoded['type'] == 'session_start') {
         final session = _sessions.putIfAbsent(epId, () => _MeetingSession());
         session.participantCount = decoded['participant_count'] ?? 2;
-        session.roles =
-            (decoded['roles'] as List?)?.map((r) => r.toString()).toList() ??
+        session.roles = (decoded['roles'] as List?)
+                ?.map((r) => r.toString())
+                .toList() ??
             [];
         setState(() => _status = 'Recording in progress...');
         _addLog(
-          'Meeting info received: ${session.participantCount} participants.',
-        );
+            'Meeting info received: ${session.participantCount} participants.');
       } else if (decoded['type'] == 'chunk') {
+        debugPrint('[phone] chunk metadata received from $epId: $decoded');
         _pendingChunkMetaByEndpoint[epId] = {
           'chunk_index': decoded['chunk_index'],
           'is_final': decoded['is_final'] ?? false,
         };
       }
     } catch (_) {
-      // Ignore malformed metadata; the matching chunk just won't
-      // get transcribed.
+      // Not valid JSON => this is the audio chunk itself.
+      debugPrint('[phone] audio bytes received from $epId: ${bytes.length} bytes');
+      _handleChunkAudio(epId, bytes);
     }
   }
-
-  Future<void> _handleChunkFile(String epId, String filePath) async {
+  Future<void> _handleChunkAudio(String epId, List<int> bytes) async {
     final meta = _pendingChunkMetaByEndpoint.remove(epId);
-    if (meta == null) return; // no metadata paired with this file - skip it
+    if (meta == null) {
+      debugPrint('[phone] audio bytes arrived with NO metadata');
+      _addLog('A chunk arrived but had no matching info - dropped.');
+      return;
+    }
+    debugPrint('[phone] pairing ${bytes.length} audio bytes with meta $meta');
 
     final chunkIndex = meta['chunk_index'] as int;
     final isFinal = meta['is_final'] as bool;
@@ -168,7 +168,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _isProcessing = true);
     _addLog('Chunk $chunkIndex received - transcribing...');
 
-    final transcript = await _transcribeChunk(filePath, chunkIndex);
+    final transcript = await _transcribeChunk(bytes, chunkIndex);
     final session = _sessions.putIfAbsent(epId, () => _MeetingSession());
     if (transcript != null) {
       session.chunkTranscripts[chunkIndex] = transcript;
@@ -176,14 +176,8 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       _addLog('Chunk $chunkIndex failed to transcribe - skipped.');
     }
-
-    // Chunk audio is only needed for this transcription step - delete
-    // it immediately once we have the text back, whether it succeeded
-    // or not. Nothing about the chunk itself needs to persist.
-    try {
-      final f = File(filePath);
-      if (await f.exists()) await f.delete();
-    } catch (_) {}
+    // Nothing was ever written to disk on the phone - the bytes just
+    // go out of scope here once transcription is done.
 
     if (isFinal) {
       await _finalizeMeeting(session);
@@ -193,14 +187,18 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<String?> _transcribeChunk(String filePath, int chunkIndex) async {
+  Future<String?> _transcribeChunk(List<int> bytes, int chunkIndex) async {
     try {
       var request = http.MultipartRequest(
         'POST',
         Uri.parse('$_baseUrl/transcribe-chunk'),
       );
       request.fields['chunk_index'] = chunkIndex.toString();
-      request.files.add(await http.MultipartFile.fromPath('audio', filePath));
+      request.files.add(http.MultipartFile.fromBytes(
+        'audio',
+        bytes,
+        filename: 'chunk_$chunkIndex.opus',
+      ));
 
       var response = await request.send();
       var responseData = await response.stream.bytesToString();
@@ -210,7 +208,8 @@ class _HomeScreenState extends State<HomeScreen> {
         return data['transcript'] as String?;
       }
       return null;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[phone] transcribe chunk $chunkIndex failed: $e');
       return null;
     }
   }
@@ -220,9 +219,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _addLog('All chunks in - combining transcript.');
 
     final orderedKeys = session.chunkTranscripts.keys.toList()..sort();
-    final fullText = orderedKeys
-        .map((k) => session.chunkTranscripts[k])
-        .join('\n');
+    final fullText =
+        orderedKeys.map((k) => session.chunkTranscripts[k]).join('\n');
 
     try {
       final response = await http.post(
@@ -315,9 +313,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Text(
                         _status,
                         style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
+                            fontSize: 16, fontWeight: FontWeight.bold),
                       ),
                     ),
                   ],
@@ -334,10 +330,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: SingleChildScrollView(
-                    child: Text(
-                      _result,
-                      style: const TextStyle(fontSize: 16, height: 1.5),
-                    ),
+                    child: Text(_result,
+                        style: const TextStyle(fontSize: 16, height: 1.5)),
                   ),
                 ),
               ),
@@ -361,19 +355,14 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(
                 child: _log.isEmpty
                     ? const Center(
-                        child: Text(
-                          'No activity yet.',
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      )
+                        child: Text('No activity yet.',
+                            style: TextStyle(color: Colors.grey)))
                     : ListView.builder(
                         itemCount: _log.length,
                         itemBuilder: (context, i) => Padding(
                           padding: const EdgeInsets.symmetric(vertical: 4),
-                          child: Text(
-                            '• ${_log[i]}',
-                            style: const TextStyle(fontSize: 14),
-                          ),
+                          child: Text('• ${_log[i]}',
+                              style: const TextStyle(fontSize: 14)),
                         ),
                       ),
               ),

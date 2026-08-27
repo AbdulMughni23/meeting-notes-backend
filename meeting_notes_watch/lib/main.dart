@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:record/record.dart';
@@ -46,6 +47,7 @@ class _WatchSetupScreenState extends State<WatchSetupScreen> {
 
   int _chunkIndex = 0;
   Completer<void>? _chunkCompleter;
+  int _lastFailedChunk = -1;
 
   @override
   void initState() {
@@ -185,11 +187,8 @@ class _WatchSetupScreenState extends State<WatchSetupScreen> {
       if (path == null) break;
 
       final isFinal = !_isRecording;
-      setState(
-        () => _status = isFinal
-            ? 'Sending final chunk...'
-            : 'Recording (sent ${_chunkIndex + 1})',
-      );
+      setState(() => _status =
+          isFinal ? 'Sending final chunk...' : 'Recording (sent ${_chunkIndex + 1})');
 
       // Await fully before recording the next chunk, so chunk metadata
       // and its file always arrive at the phone strictly in order.
@@ -237,12 +236,29 @@ class _WatchSetupScreenState extends State<WatchSetupScreen> {
         'chunk_index': chunkIndex,
         'is_final': isFinal,
       });
+      debugPrint('[watch] sending chunk $chunkIndex meta: $meta');
       await Nearby().sendBytesPayload(endpointId, utf8.encode(meta));
-      await Nearby().sendFilePayload(endpointId, filePath);
-    } catch (_) {
-      // Best-effort: if a chunk fails to send, we still move on so the
-      // recording doesn't get stuck. The phone will just be missing
-      // that chunk's text in the final transcript.
+
+      // Switched from sendFilePayload to sendBytesPayload: on this
+      // plugin/device combo, Payload.filePath never gets populated on
+      // the receiving end (confirmed via debug log), so FILE payloads
+      // were undeliverable in practice. BYTES payloads deliver
+      // reliably and immediately, so we read the chunk into memory
+      // and send it that way instead.
+      final bytes = await File(filePath).readAsBytes();
+      debugPrint('[watch] sending chunk $chunkIndex audio: ${bytes.length} bytes');
+      await Nearby().sendBytesPayload(endpointId, bytes);
+      debugPrint('[watch] chunk $chunkIndex send call returned OK');
+
+      try {
+        await File(filePath).delete();
+      } catch (_) {}
+    } catch (e, st) {
+      debugPrint('[watch] chunk $chunkIndex send FAILED: $e\n$st');
+      _lastFailedChunk = chunkIndex;
+      if (mounted) {
+        setState(() => _status = 'Chunk $chunkIndex failed to send: $e');
+      }
     }
   }
 
@@ -290,8 +306,7 @@ class _WatchSetupScreenState extends State<WatchSetupScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final bool showRetry =
-        _status == 'Phone not found. Try again.' ||
+    final bool showRetry = _status == 'Phone not found. Try again.' ||
         _status == 'Connection failed. Try again.' ||
         _status == 'Disconnected' ||
         _status == 'Meeting Sent. Processing on Phone...';
@@ -304,20 +319,13 @@ class _WatchSetupScreenState extends State<WatchSetupScreen> {
         backgroundColor: Colors.transparent,
       ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.only(
-          top: 16,
-          bottom: 55,
-          left: 16,
-          right: 16,
-        ),
+        padding: const EdgeInsets.only(top: 16, bottom: 55, left: 16, right: 16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             if (!_isRecording && _status == 'Setup') ...[
-              const Text(
-                'Participants',
-                style: TextStyle(fontSize: 14, color: Colors.grey),
-              ),
+              const Text('Participants',
+                  style: TextStyle(fontSize: 14, color: Colors.grey)),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -337,10 +345,9 @@ class _WatchSetupScreenState extends State<WatchSetupScreen> {
                     child: Text(
                       '$_participantCount',
                       style: const TextStyle(
-                        fontSize: 48,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.blue,
-                      ),
+                          fontSize: 48,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue),
                     ),
                   ),
                   InkWell(
@@ -392,13 +399,9 @@ class _WatchSetupScreenState extends State<WatchSetupScreen> {
             ] else if (_isRecording) ...[
               const Icon(Icons.mic, size: 64, color: Colors.red),
               const SizedBox(height: 24),
-              Text(
-                '$_recordingSeconds s',
-                style: const TextStyle(
-                  fontSize: 48,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
+              Text('$_recordingSeconds s',
+                  style:
+                      const TextStyle(fontSize: 48, fontWeight: FontWeight.bold)),
               const SizedBox(height: 40),
               SizedBox(
                 width: double.infinity,
