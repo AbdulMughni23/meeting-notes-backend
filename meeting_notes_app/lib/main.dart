@@ -38,8 +38,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String _result = '';
   bool _isProcessing = false;
   final String _serviceId = 'meeting_notes_sync';
-  final String _baseUrl = 'https://meeting-notes-backend-60qx.onrender.com';
-
+  final String _baseUrl = const String.fromEnvironment("baseUrl");
   final List<String> _log = [];
 
   // Endpoint -> the session_start / chunk metadata expected next.
@@ -133,13 +132,13 @@ class _HomeScreenState extends State<HomeScreen> {
       if (decoded['type'] == 'session_start') {
         final session = _sessions.putIfAbsent(epId, () => _MeetingSession());
         session.participantCount = decoded['participant_count'] ?? 2;
-        session.roles = (decoded['roles'] as List?)
-                ?.map((r) => r.toString())
-                .toList() ??
+        session.roles =
+            (decoded['roles'] as List?)?.map((r) => r.toString()).toList() ??
             [];
         setState(() => _status = 'Recording in progress...');
         _addLog(
-            'Meeting info received: ${session.participantCount} participants.');
+          'Meeting info received: ${session.participantCount} participants.',
+        );
       } else if (decoded['type'] == 'chunk') {
         debugPrint('[phone] chunk metadata received from $epId: $decoded');
         _pendingChunkMetaByEndpoint[epId] = {
@@ -149,10 +148,13 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (_) {
       // Not valid JSON => this is the audio chunk itself.
-      debugPrint('[phone] audio bytes received from $epId: ${bytes.length} bytes');
+      debugPrint(
+        '[phone] audio bytes received from $epId: ${bytes.length} bytes',
+      );
       _handleChunkAudio(epId, bytes);
     }
   }
+
   Future<void> _handleChunkAudio(String epId, List<int> bytes) async {
     final meta = _pendingChunkMetaByEndpoint.remove(epId);
     if (meta == null) {
@@ -194,11 +196,13 @@ class _HomeScreenState extends State<HomeScreen> {
         Uri.parse('$_baseUrl/transcribe-chunk'),
       );
       request.fields['chunk_index'] = chunkIndex.toString();
-      request.files.add(http.MultipartFile.fromBytes(
-        'audio',
-        bytes,
-        filename: 'chunk_$chunkIndex.opus',
-      ));
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'audio',
+          bytes,
+          filename: 'chunk_$chunkIndex.opus',
+        ),
+      );
 
       var response = await request.send();
       var responseData = await response.stream.bytesToString();
@@ -219,8 +223,9 @@ class _HomeScreenState extends State<HomeScreen> {
     _addLog('All chunks in - combining transcript.');
 
     final orderedKeys = session.chunkTranscripts.keys.toList()..sort();
-    final fullText =
-        orderedKeys.map((k) => session.chunkTranscripts[k]).join('\n');
+    final fullText = orderedKeys
+        .map((k) => session.chunkTranscripts[k])
+        .join('\n');
 
     try {
       final response = await http.post(
@@ -313,7 +318,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Text(
                         _status,
                         style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.bold),
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                   ],
@@ -330,8 +337,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: SingleChildScrollView(
-                    child: Text(_result,
-                        style: const TextStyle(fontSize: 16, height: 1.5)),
+                    child: Text(
+                      _result,
+                      style: const TextStyle(fontSize: 16, height: 1.5),
+                    ),
                   ),
                 ),
               ),
@@ -355,14 +364,19 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(
                 child: _log.isEmpty
                     ? const Center(
-                        child: Text('No activity yet.',
-                            style: TextStyle(color: Colors.grey)))
+                        child: Text(
+                          'No activity yet.',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      )
                     : ListView.builder(
                         itemCount: _log.length,
                         itemBuilder: (context, i) => Padding(
                           padding: const EdgeInsets.symmetric(vertical: 4),
-                          child: Text('• ${_log[i]}',
-                              style: const TextStyle(fontSize: 14)),
+                          child: Text(
+                            '• ${_log[i]}',
+                            style: const TextStyle(fontSize: 14),
+                          ),
                         ),
                       ),
               ),
